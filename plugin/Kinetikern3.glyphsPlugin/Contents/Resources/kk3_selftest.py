@@ -1028,7 +1028,7 @@ class SelfTest(object):
         win = self.win
         w = win.w
         self.heartbeat.stage(SLIDERS)
-        saved = (w.tightness.get(), w.intensity.get(), w.threshold.get(), w.thresholdField.get(), bool(w.harness.get()))
+        saved = (w.tightness.get(), w.intensity.get(), w.threshold.get(), w.thresholdField.get(), int(w.harness.get()))
         self.slider_saved = saved
         # each slider moved from where the settings put it (a user's settings
         # may already sit at an end)
@@ -1047,7 +1047,7 @@ class SelfTest(object):
              win.physicsChanged, w.intensity),
             ("the threshold from %.1f to %.1f" % (saved[2], higher), lambda: threshold(higher), win.thresholdChanged,
              w.threshold),
-            ("the designer harness %s" % ("off" if saved[4] else "on"), lambda: w.harness.set(not saved[4]),
+            ("the designer harness %s" % ("off" if saved[4] else "on"), lambda: w.harness.set(0 if saved[4] else 1),
              win.harnessChanged, w.harness),
             ("the Looseness back to %+.2f" % saved[0], lambda: w.tightness.set(saved[0]), win.physicsChanged,
              w.tightness),

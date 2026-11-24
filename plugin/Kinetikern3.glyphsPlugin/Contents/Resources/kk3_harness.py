@@ -86,10 +86,10 @@ def style_choices():
     return [(AUTO, "Automatic")] + available_styles()
 
 
-def _style_table(style):
+def _style_table(style, profile=None):
     for k, _label, cat in STYLES:
         if k == style and cat is not None:
-            return table().get("categories", {}).get(cat)
+            return (profile if profile is not None else table()).get("categories", {}).get(cat)
     return None
 
 
@@ -162,10 +162,12 @@ class Plan(object):
     on top of it, so with it off the harness leaves punctuation alone (its
     sides and every pair with a punctuation mark), as the switch promises."""
 
-    def __init__(self, snap, looseness, strength, frozen=None, style="text", kept=None, punctuation=True):
-        t = table()
+    def __init__(self, snap, looseness, strength, frozen=None, style="text", kept=None, punctuation=True, profile=None):
+        t = profile if profile is not None else table()
         self.punctuation = bool(punctuation)
-        extra = _style_table(style)
+        self.source_name = t.get("name", "Google Fonts")
+        self.profile_status = t.get("provenance", {}).get("status", "bundled")
+        extra = None if self.source_name == "Fontz" else _style_table(style, t)
         self.style = style if extra is not None else "text"
         self.style_label = dict((k, label) for k, label, _c in STYLES)[self.style]
         self.table_id = t.get("id", "")
@@ -191,24 +193,25 @@ class Plan(object):
         # its base mark, an accented letter (not auto-aligned) by its base letter
         self.key = [None] * n
         self.exact = [False] * n
+        code_key = {code: key for code, key in CODE_KEY.items() if key in t["glyphs"]}
         for i, name in enumerate(snap.names):
             info = snap.infos.get(name)
             if info is None or info.empty:
                 continue
-            k = CODE_KEY.get(info.unicode) if info.unicode is not None else None
+            k = code_key.get(info.unicode) if info.unicode is not None else None
             if k is not None:
                 self.key[i], self.exact[i] = k, True
                 continue
             parts = name.split(".")
             if len(parts) > 1 and parts[-1] in CASE_SUFFIXES:
                 base = snap.infos.get(parts[0])
-                bk = CODE_KEY.get(base.unicode) if base is not None and base.unicode is not None else None
+                bk = code_key.get(base.unicode) if base is not None and base.unicode is not None else None
                 if bk in PUNCTUATION:
                     self.key[i], self.exact[i] = bk, True
                     continue
             if info.components:
                 base = snap.infos.get(info.components[0])
-                bk = CODE_KEY.get(base.unicode) if base is not None and base.unicode is not None else None
+                bk = code_key.get(base.unicode) if base is not None and base.unicode is not None else None
                 if bk is not None and bk not in PUNCTUATION:
                     self.key[i] = bk
         left_c, right_c = t["left"], t["right"]
@@ -223,11 +226,16 @@ class Plan(object):
         # a side that follows another glyph's side gets that side's shift
         specs = snap.specs
         memo = {}
+        frozen = frozenset(frozen or ())
+        kept_l, kept_r = (frozenset(kept[0]), frozenset(kept[1])) if kept else (frozenset(), frozenset())
 
         def side(i, left, depth=0):
             key = (i, left)
             if key in memo:
                 return memo[key]
+            if (i in frozen or i in (kept_l if left else kept_r)
+                    or getattr(specs[i], "flags", 0) & kb.GLYPH_FIXED_ADVANCE):
+                return 0.0
             if depth > 32:
                 return 0.0
             spec = specs[i]
@@ -235,17 +243,15 @@ class Plan(object):
             target = spec.lsb_glyph if left else spec.rsb_glyph
             if rule == kb.RULE_FIXED:
                 v = 0.0
-            elif rule == kb.RULE_FOLLOW_SAME and target != kb.NONE and target < n:
+            elif rule == kb.RULE_FOLLOW_SAME and target != kb.NONE and 0 <= target < n:
                 v = side(target, left, depth + 1)
-            elif rule == kb.RULE_FOLLOW_OPPOSITE and target != kb.NONE and target < n:
+            elif rule == kb.RULE_FOLLOW_OPPOSITE and target != kb.NONE and 0 <= target < n:
                 v = side(target, not left, depth + 1)
             else:
                 v = own[i][0 if left else 1]
             memo[key] = v
             return v
 
-        frozen = frozenset(frozen or ())
-        kept_l, kept_r = (frozenset(kept[0]), frozenset(kept[1])) if kept else (frozenset(), frozenset())
         self.sides = [[0.0, 0.0] if i in frozen else
                       [0.0 if i in kept_l else side(i, True), 0.0 if i in kept_r else side(i, False)]
                       for i in range(n)]
@@ -271,7 +277,7 @@ class Plan(object):
             value = unit * v
             for i in by_key[a]:
                 for j in by_key[b]:
-                    if (i in frozen and j in frozen) or (i in kept_r and j in kept_l):
+                    if (i in frozen or i in kept_r) and (j in frozen or j in kept_l):
                         continue
                     self.pairs.append((i, j, value))
                     self.pair_value[(i, j)] = value
@@ -330,5 +336,5 @@ class Plan(object):
         stem = ("stem %.0f" % self.stem_measured) if self.stem_measured else "stem not measured (no I or l)"
         style = ("" if self.style == "text" else " · %s punctuation" % self.style_label) if self.punctuation else \
             " · letters only (Punctuation off)"
-        return "%d %%%s · %s · Looseness %+.2f · %d glyph sides, %d pairs corrected" % (
+        return (self.source_name + (" (" + self.profile_status + ")" if self.source_name == "Fontz" else "")) + " · %d %%%s · %s · Looseness %+.2f · %d glyph sides, %d pairs corrected" % (
             round(100 * self.strength), style, stem, self.looseness, self.changed_sides, len(self.pairs))

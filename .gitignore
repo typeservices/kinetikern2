@@ -3,3 +3,7 @@ engine/target/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Private Fontz measurements and outline proofs
+results/fontz-k3/
+dist/

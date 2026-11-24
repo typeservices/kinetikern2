@@ -65,8 +65,9 @@ class HarnessWindow(object):
         w = vanilla.Window((980, 660), title, minSize=(980, 460))
         self.w = w
         mw = self.main.w
-        w.on = vanilla.CheckBox((12, 10, 190, 20), "Use the designer harness", sizeStyle="small",
-                                value=bool(mw.harness.get()), callback=self.onChanged)
+        w.on = vanilla.PopUpButton((12, 10, 190, 22), ["Off", "Google Fonts", "Fontz"],
+                                   sizeStyle="small", callback=self.onChanged)
+        w.on.set(int(mw.harness.get()))
         w.strengthLabel = vanilla.TextBox((210, 13, 60, 17), "Strength", sizeStyle="small")
         w.strength = vanilla.Slider((268, 10, 200, 22), minValue=0.0, maxValue=100.0,
                                     value=float(mw.harnessStrength.get()), callback=self.strengthChanged)
@@ -88,7 +89,9 @@ class HarnessWindow(object):
             "as well, which they space more openly, and their capitals, which reach further over the next letter. "
             "Automatic: handwriting for a connected script or a hand whose stems lean without an italic angle, "
             "else text faces. The same menu as the main window's.")
-        w.status = vanilla.TextBox((230, 40, -12, 32), "", sizeStyle="small")
+        w.importHarness = vanilla.Button((-150, 39, -12, 22), "Import Fontz…",
+                                          callback=self.main.importHarnessClicked, sizeStyle="small")
+        w.status = vanilla.TextBox((230, 40, -165, 32), "", sizeStyle="small")
         w.list = vanilla.List((12, 76, 520, -40), [], columnDescriptions=[
             dict(title="#", key="rank", width=26),
             dict(title="Pair", key="pair", width=130),
@@ -119,7 +122,7 @@ class HarnessWindow(object):
         self.refresh()
 
     def onChanged(self, sender):
-        self.main.w.harness.set(bool(self.w.on.get()))
+        self.main.w.harness.set(int(self.w.on.get()))
         self.main.harnessChanged(None)
 
     def styleChanged(self, sender):
@@ -146,7 +149,7 @@ class HarnessWindow(object):
         if self._closed:
             return
         mw = self.main.w
-        self.w.on.set(bool(mw.harness.get()))
+        self.w.on.set(int(mw.harness.get()))
         self.w.strength.set(float(mw.harnessStrength.get()))
         keys = [k for k, _label in self.styles]
         if self.main.harness_style in keys:
@@ -165,6 +168,8 @@ class HarnessWindow(object):
         """The harness the list shows: the main window's, or at full strength
         while it is off (the list then shows what turning it on would do)."""
         main = self.main
+        if main._harness_result_current() and main._result_harness is not None:
+            return main._result_harness
         plan = main._harness_plan()
         if plan is None and main.snapshot is not None and main.harness_available():
             plan = main._harness_plan(force_strength=float(self.w.strength.get()) / 100.0 or 1.0)
@@ -174,7 +179,7 @@ class HarnessWindow(object):
         """Glyph indices the main window's preview should kern for this list."""
         return self._glyphs
 
-    def refresh(self):
+    def refresh(self, update_only=False):
         """Recomputes the list (cheap: no engine job; the drawing waits for the
         main window's preview to cover the pairs)."""
         if self._closed:
@@ -186,7 +191,12 @@ class HarnessWindow(object):
             self.w.status.set("The font is still being read.")
             return
         if not main.harness_available():
-            self.w.status.set("This build of the engine has no designer harness: rebuild it with build.sh.")
+            self.pairs = []
+            self.selected = None
+            self._glyphs = frozenset()
+            self.w.list.set([])
+            self.preview.setNeedsDisplay_(True)
+            self.w.status.set(main._harness_problem() or "This engine has no designer harness.")
             return
         plan = self.plan()
         if plan is None:
@@ -194,16 +204,20 @@ class HarnessWindow(object):
             return
         on = bool(self.w.on.get()) and float(self.w.strength.get()) > 0
         per = 1000.0 / float(snap.upm)
-        pairs = plan.top_pairs(snap, COUNT, which=FILTERS[max(0, self.w.which.get())][0])
+        # A completed solve updates the existing rows, without choosing a new
+        # candidate set and scheduling another preview from its own callback.
+        pairs = self.pairs if update_only else plan.top_pairs(snap, COUNT, which=FILTERS[max(0, self.w.which.get())][0])
         names = snap.names
         rows = []
         for k, (a, b, d) in enumerate(pairs):
             ca = getattr(snap.infos.get(names[a]), "char", None) or ""
             cb = getattr(snap.infos.get(names[b]), "char", None) or ""
             label = "%s%s   %s %s" % (ca, cb, names[a], names[b]) if ca and cb else "%s %s" % (names[a], names[b])
-            rows.append({"rank": k + 1, "pair": label, "delta": "%+.0f" % (d * per),
+            pc = main.harness_pair_correction(a, b, plan)
+            delta = plan.sides[a][1] + plan.sides[b][0] + pc if pc is not None else None
+            rows.append({"rank": k + 1, "pair": label, "delta": "%+.0f" % (delta * per) if delta is not None else "…",
                          "left": "%+.0f" % (plan.sides[a][1] * per), "right": "%+.0f" % (plan.sides[b][0] * per),
-                         "pairc": "%+.0f" % (plan.pair_value.get((a, b), 0.0) * per)
+                         "pairc": ("%+.0f" % (pc * per) if pc is not None else "…")
                          if (a, b) in plan.pair_value else ""})
         # the pair shown stays selected by its glyphs' names (a master read again renumbers nothing,
         # but another master or a changed font may)
@@ -212,16 +226,14 @@ class HarnessWindow(object):
         self._snap = snap
         self.w.list.set(rows)
         glyphs = frozenset(i for a, b, _ in pairs for i in (a, b))
-        if glyphs != self._glyphs:
+        if not update_only and glyphs != self._glyphs:
             self._glyphs = glyphs
             main._request_preview()  # kern these pairs too
-        self.w.status.set(
+        self.w.status.set(main.harness_comparison_problem() or (
             ("Live: the preview and Apply use it. " if on else "Off: this is what it would do at %d %%. " % round(
                 100 * plan.strength)) + plan.summary().capitalize() +
-            (". Learned from %d text families on Google Fonts rated well spaced, at %d weights in all." % (
-                plan.table_families, plan.table_observations) if plan.style == "text" else
-             ". Its punctuation learned from %d %s families on Google Fonts rated well spaced." % (
-                 plan.table_families, plan.style_label.lower())))
+            ". %s · %s · %d families, %d observations." % (
+                plan.source_name, plan.profile_status, plan.table_families, plan.table_observations)))
         if rows:
             idx = 0
             if keep is not None:
@@ -253,7 +265,7 @@ class HarnessWindow(object):
         if self.main.snapshot is not None and self.main.snapshot is not self._snap:
             self.refresh()  # made from an older snapshot: its glyph indices may point elsewhere now
             return
-        self.preview.setNeedsDisplay_(True)
+        self.refresh(update_only=True)
 
     # -------------------------------------------------------------- preview
     def rowSelected(self, sender):
@@ -304,13 +316,13 @@ class HarnessWindow(object):
         rows = [("In the font", NSColor.textColor(), 0.0, float(ia.width) + kern_now, 0.0)]
         model = main.model_pair(a, b)
         plan = self.plan()
-        if model is None or plan is None:
-            self._label("Waiting for the preview to kern this pair…", 14, 14, 11.0)
+        pc = main.harness_pair_correction(a, b, plan) if plan is not None else None
+        if model is None or plan is None or pc is None:
+            self._label(main.harness_comparison_problem() or "Waiting for the preview to kern this pair…", 14, 14, 11.0)
         else:
             (la, ra, adv_a), (lb, _rb, _adv_b), k = model
             rows.append(("Kinetikern3", NSColor.systemBlueColor(), la - ia.lsb, adv_a + k, lb - ib.lsb))
             sa, sb = plan.sides[a], plan.sides[b]
-            pc = plan.pair_value.get((a, b), 0.0)
             rows.append(("With the harness", NSColor.systemOrangeColor(), la + sa[0] - ia.lsb,
                          adv_a + sa[0] + sa[1] + k + pc, lb + sb[0] - ib.lsb))
         scale = min((wdt - 40) / (2.4 * upm), (h - 80) / (3.9 * upm))
@@ -329,10 +341,10 @@ class HarnessWindow(object):
                 color.set()
                 path.fill()
                 ctx.restoreGraphicsState()
-        if model is not None and plan is not None:
+        if model is not None and plan is not None and pc is not None:
             (la, ra, adv_a), (lb, _rb, _adv_b), k = model
             gap = ra + k + lb
-            d = plan.delta(a, b)
+            d = plan.sides[a][1] + plan.sides[b][0] + pc
             self._label("%s %s · Kinetikern3's gap %.0f, with the harness %.0f (%+.0f) units per 1000 em" % (
                 na, nb, gap * per, (gap + d) * per, d * per), 14, 14, 11.0)
 

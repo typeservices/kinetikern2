@@ -52,7 +52,7 @@ import weakref
 import objc
 import vanilla
 import vanilla.dialogs
-from AppKit import NSAlert, NSAlertFirstButtonReturn, NSColor, NSFont, NSObject, NSPasteboard, NSPasteboardTypeString
+from AppKit import NSAlert, NSAlertFirstButtonReturn, NSColor, NSFont, NSObject, NSPasteboard, NSPasteboardTypeString, NSOpenPanel, NSModalResponseOK
 from Foundation import NSRunLoop, NSRunLoopCommonModes, NSTimer
 
 import kk3_apply as ka
@@ -60,6 +60,7 @@ import kk3_args
 import kk3_bridge as kb
 import kk3_groups as kg
 import kk3_harness as kh
+import kk3_harness_profiles as khp
 import kk3_punctuation as kpu
 import kk3_proof as kp
 import kk3_snapshot as ks
@@ -339,9 +340,17 @@ class KK3Window(object):
         self.harness_style = self._setting("harnessStyle", kh.AUTO, str)
         if self.harness_style not in [k for k, _label in kh.style_choices()]:
             self.harness_style = kh.AUTO
+        self._fontz_harness = None
+        self._fontz_harness_error = ""
+        try:
+            self._fontz_harness = khp.load_fontz_profile()
+        except (ValueError, OSError) as error:
+            self._fontz_harness_error = str(error)
+        self._harness_last_mode = 1
         self._harness_cache = None
         self._job_harness = None
         self._result_harness = None
+        self._result_gg = None
         # tightness by category and keeping the font's fit (the Categories window)
         self.category_offsets = self._offsets_setting()
         self.keep_fit = self._setting("keepFit", False, bool)
@@ -467,8 +476,13 @@ class KK3Window(object):
 
         x = 886
         # the switches: right-aligned on the top row, so that the four fit the narrowest window (1200 points)
-        w.harness = vanilla.CheckBox((-358, 9, 113, 18), "Designer harness", sizeStyle="small",
-                                     value=self._setting("harness", False, bool), callback=self.harnessChanged)
+        w.harness = vanilla.PopUpButton((-358, 7, 113, 22), ["Off", "Google Fonts", "Fontz"],
+                                        sizeStyle="small", callback=self.harnessChanged)
+        self._harness_selection = self._setting("harnessProfile", int(self._setting("harness", False, bool)), int)
+        if self._harness_selection not in (0, 1, 2):
+            self._harness_selection = 0
+        w.harness.set(self._harness_selection)
+        self._harness_last_mode = self._harness_selection or 1
         w.punctuation = vanilla.CheckBox((-242, 9, 84, 18), "Punctuation", sizeStyle="small",
                                          value=self._setting("punctuation", True, bool),
                                          callback=self.punctuationChanged)
@@ -517,14 +531,17 @@ class KK3Window(object):
             "letter (Ha, To, Wa): a display face's capitals reach further than a text face's, handwriting's "
             "further still. Automatic: handwriting for a connected script or a hand whose stems lean without "
             "an italic angle, else text faces. The punctuation switch and the harness follow it too.")
-        w.harness.getNSButton().setToolTip_(
-            "Nudges the result toward what the designers of well-spaced fonts do where Kinetikern3 consistently "
+        w.harness.getNSPopUpButton().setToolTip_(
+            "Choose one correction source: Off, Google Fonts, or Fontz. Fontz requires a compatible profile "
+            "for this engine, upright Latin, Text faces conventions, and Punctuation enabled. "
+            "Google Fonts nudges the result toward what the designers of well-spaced fonts do where Kinetikern3 consistently "
             "differs: more space in parentheses and around / ? ! &, less around quotes, period, comma and "
             "hyphen; more on the open sides of E, F, L and T (most at light weights and tight settings), less on "
             "the diagonals of A, V, W, Y. Learned from the text fonts on Google Fonts.")
         w.harnessStrength = vanilla.Slider((x, 28, 58, 22), minValue=0.0, maxValue=100.0,
                                            value=min(100.0, max(0.0, self._setting("harnessStrength", 100.0))),
                                            callback=self.harnessChanged)
+        self._harness_saved_strength = float(w.harnessStrength.get())
         w.harnessStrength.getNSSlider().setToolTip_("How much of the harness to apply (100 % = what the data say).")
         w.harnessStrengthField = vanilla.EditText((x + 62, 28, 34, 21), "", callback=self.harnessStrengthFieldChanged,
                                                   continuous=False, sizeStyle="small")
@@ -1101,6 +1118,7 @@ class KK3Window(object):
                 self.join_count, self._join_mode(),
                 tuple(sorted(self.category_offsets.items())), self._keep_fit_on(), round(self.stay_close, 3),
                 round(self._exceptions(), 3), round(self.caps_to_lower, 4), round(self.lower_to_caps, 4),
+                self._harness_identity(),
                 # the last five as they are: the self-tests read them from the end
                 self._small_caps_on(), self._figures_on(), self._punctuation_on(),
                 self._style(),
@@ -1150,7 +1168,10 @@ class KK3Window(object):
     def _update_harness_label(self):
         if self.w is None or getattr(self.w, "harness", None) is None:
             return
-        if not self.harness_available():
+        problem = self._harness_problem()
+        if problem:
+            text = problem
+        elif not self.harness_available():
             text = ("harness unavailable: rebuild the plugin (build.sh)" if not self.engine.features & kb.FEATURE_HARNESS
                     else "harness unavailable: kk3_harness.json is missing")
         elif not self.w.harness.get():
@@ -1216,7 +1237,7 @@ class KK3Window(object):
         busy = solving or self._stepper is not None or self.state == "applying"
         for control in (w.tightness, w.tightField, w.kerning, w.threshold, w.thresholdField, w.exceptionsField,
                         w.maxPairs, w.threads,
-                        w.master, w.scope, w.replace, w.reload):
+                        w.master, w.scope, w.replace, w.reload, w.harness):
             control.enable(not busy)
         for control in (w.intensity, w.intensityField):
             control.enable(not busy and self._kerning_on())
@@ -2001,6 +2022,7 @@ class KK3Window(object):
     def _set_result(self, result, kind, requested, key):
         old = self.result
         self.result = result
+        self._result_gg = None
         self._fitted = result.fitted_looseness if result is not None else None
         self._category_fits = result.category_fits() if result is not None else {}
         self._result_kind = kind
@@ -2529,6 +2551,7 @@ class KK3Window(object):
             "threshold": round(self._threshold(), 3),
             "exceptions": round(self._exceptions(), 3),
             "harness": bool(w.harness.get()),
+            "harnessProfile": int(w.harness.get()),
             "harnessStrength": round(float(w.harnessStrength.get()), 2),
             "conventions": self.harness_style,
             "punctuation": bool(w.punctuation.get()),
@@ -2557,7 +2580,7 @@ class KK3Window(object):
     def default_settings():
         """Kinetikern3's own settings (Reset Settings)."""
         return {SETTINGS_FORMAT: SETTINGS_VERSION, "looseness": 0.0, "kerning": True, "intensity": 100.0,
-                "threshold": DEFAULT_THRESHOLD, "exceptions": 0.0, "harness": False, "harnessStrength": 100.0, "conventions": kh.AUTO,
+                "threshold": DEFAULT_THRESHOLD, "exceptions": 0.0, "harness": False, "harnessProfile": 0, "harnessStrength": 100.0, "conventions": kh.AUTO,
                 "punctuation": True, "figures": True, "smallCaps": True, "connected": True, "joinMode": "keep",
                 "alongSlant": True, "maxPairs": DEFAULT_MAX_PAIRS, "threads": 0, "applyTo": "sample",
                 "replaceKerning": True, "textSize": DEFAULT_SIZE, "view": "side", "overlay": "red",
@@ -2625,11 +2648,14 @@ class KK3Window(object):
             w.exceptionsField.set("%g" % round(v, 1) if v else "")
             self.exceptionsFieldChanged(None)
         on, strength = flag("harness"), number("harnessStrength", 0.0, 100.0)
-        if on is not None:
-            w.harness.set(on)
+        mode = number("harnessProfile", 0, 2)
+        if mode is not None and mode == int(mode):
+            w.harness.set(int(mode))
+        elif on is not None:
+            w.harness.set(int(on))
         if strength is not None:
             w.harnessStrength.set(strength)
-        if on is not None or strength is not None:
+        if on is not None or mode is not None or strength is not None:
             self.harnessChanged(None)
         if "conventions" in d:
             if d["conventions"] in [k for k, _label in self.styles]:
@@ -2792,8 +2818,31 @@ class KK3Window(object):
             self.harness_window.settings_changed()  # its corrections follow the Looseness
 
     # ------------------------------------------------------- designer harness
+    def _harness_problem(self):
+        if self.w is None or (self.w.harness.get() or self._harness_last_mode) != 2:
+            return ""
+        if self._fontz_harness is None:
+            return self._fontz_harness_error or "Fontz unavailable · import a harness"
+        if self._style() != "text":
+            return "Fontz paused · select Text faces conventions"
+        if not self._punctuation_on():
+            return "Fontz paused · enable Punctuation"
+        snap = self.snapshot
+        if snap is not None and abs(getattr(snap, "slant_degrees", 0.0)) > 0.01:
+            return "Fontz paused · upright Latin masters only"
+        return ""
+
+    def _harness_profile(self):
+        return self._fontz_harness if (self.w.harness.get() or self._harness_last_mode) == 2 else kh.table()
+
+    def _harness_identity(self):
+        if self.w is None or not self.w.harness.get() or self._harness_problem():
+            return None
+        return khp.profile_digest(self._harness_profile())
+
     def harness_available(self):
-        return bool(self.engine.features & kb.FEATURE_HARNESS) and os.path.exists(kh.TABLE_PATH)
+        return (bool(self.engine.features & kb.FEATURE_HARNESS) and os.path.exists(kh.TABLE_PATH)
+                and not self._harness_problem())
 
     def _harness_strength(self):
         """0 … 1: how much of the harness the solves use (0 = off)."""
@@ -2806,7 +2855,7 @@ class KK3Window(object):
         (`force_strength`: that strength whether it is on or off), or None."""
         s = self._harness_strength() if force_strength is None else float(force_strength)
         snap = self.snapshot
-        if s <= 0 or snap is None or self.w is None:
+        if s <= 0 or snap is None or self.w is None or not self.harness_available():
             return None
         fit = self._fitted
         if fit is None and self._keep_fit_on():
@@ -2818,23 +2867,69 @@ class KK3Window(object):
         style = self._style()
         punct = self._punctuation_on()
         key = (id(snap), self._generation, round(looseness, 4), round(s, 4), self.groups.key(), style, punct,
-               id(self.context) if kept else None)
+               id(self.context) if kept else None, khp.profile_digest(self._harness_profile()))
         if self._harness_cache is not None and self._harness_cache[0] == key:
             return self._harness_cache[1]
         try:
-            plan = kh.Plan(snap, looseness, s, frozen=frozen, style=style, kept=kept, punctuation=punct)
+            plan = kh.Plan(snap, looseness, s, frozen=frozen, style=style, kept=kept, punctuation=punct,
+                           profile=self._harness_profile())
         except Exception:
             print(traceback.format_exc())
             plan = None
         self._harness_cache = (key, plan)
         return plan
 
+    def harness_comparison_problem(self):
+        """Follow groups are reapplied after the harness; its own Plan cannot
+        reconstruct those remapped results. Solving and Apply remain usable."""
+        for option in self._glyph_opts() or ():
+            if (len(option) >= 7 and option[6] & (kb.GLYPHOPT_FOLLOW_SPACING | kb.GLYPHOPT_FOLLOW_KERNING)
+                    and (option[4] != kb.NONE or option[5] != kb.NONE)):
+                return "Harness comparison unavailable while Follow groups are active. Preview and Apply still work."
+        return ""
+
+    def _harness_result_current(self):
+        """Do not mix a previous solve with the current profile or controls."""
+        return (self.result is not None and self.result.ptr is not None and self._result_key is not None
+                and self._result_key == self._solve_key(self._result_kind == "whole"))
+
+    def _harness_explicit_pairs(self):
+        """The result's explicit glyph pairs, including zero-valued exceptions."""
+        if self._result_gg is None:
+            self._result_gg = frozenset((a, b) for kind, a, b, _value, _importance
+                                        in self.result.iter_entries() if kind == kb.ENTRY_GLYPH_GLYPH)
+        return self._result_gg
+
+    def harness_pair_correction(self, a, b, plan):
+        """Actual pair correction, or its prospective value for an Off result.
+        None means the matching solve has not covered this pair yet. New pairs
+        below the threshold are omitted; existing exceptions (even zero) and
+        nonzero class kerning receive the correction regardless of its size."""
+        if not self._harness_result_current() or self.harness_comparison_problem():
+            return None
+        base = self.result.value(a, b)
+        if not math.isfinite(base):
+            return None
+        applied = self._result_harness
+        if applied is not None and plan is not applied:
+            return None
+        d = plan.pair_value.get((a, b), 0.0)
+        if not d:
+            return 0.0
+        explicit = (a, b) in self._harness_explicit_pairs()
+        if applied is not None:
+            return d if explicit else 0.0
+        if self._physics()[2] <= 0:
+            return 0.0
+        threshold = self._threshold() * self.snapshot.upm / 1000.0
+        return d if explicit or base != 0.0 or abs(d) >= threshold else 0.0
+
     def model_pair(self, a, b):
         """Kinetikern3's spacing of glyph pair (a, b) without the harness, from
         the result shown: ((lsb, rsb, advance) of a, the same of b, kerning),
         font units; None if the result does not kern the pair."""
         res = self.result
-        if res is None or res.ptr is None:
+        if not self._harness_result_current() or self.harness_comparison_problem():
             return None
         v = res.value(a, b)
         if v != v:
@@ -2843,7 +2938,10 @@ class KK3Window(object):
         sa = h.sides[a] if h is not None else (0.0, 0.0)
         sb = h.sides[b] if h is not None else (0.0, 0.0)
         ma, mb = res.metrics[a], res.metrics[b]
-        k = float(v) - (h.pair_value.get((a, b), 0.0) if h is not None else 0.0)
+        correction = self.harness_pair_correction(a, b, h) if h is not None else 0.0
+        if correction is None:
+            return None
+        k = float(v) - correction
         return ((ma.lsb - sa[0], ma.rsb - sa[1], ma.advance - sa[0] - sa[1]),
                 (mb.lsb - sb[0], mb.rsb - sb[1], mb.advance - sb[0] - sb[1]), k)
 
@@ -2940,14 +3038,59 @@ class KK3Window(object):
         self.w.harnessStrength.set(min(100.0, max(0.0, v)))
         self.harnessChanged(sender)
 
+    def _harness_busy(self):
+        return (self._stepper is not None or self.state == "applying"
+                or (self._job is not None and self._job_kind == "whole"))
+
     def harnessChanged(self, sender):
-        self._save("harness", bool(self.w.harness.get()))
-        self._save("harnessStrength", float(self.w.harnessStrength.get()))
+        if self._harness_busy():
+            self.w.harness.set(self._harness_selection)
+            self.w.harnessStrength.set(self._harness_saved_strength)
+            self._show_slider_values()
+            if self.harness_window is not None:
+                self.harness_window.settings_changed()
+            return
+        self._harness_selection = int(self.w.harness.get())
+        if self._harness_selection:
+            self._harness_last_mode = self._harness_selection
+        self._harness_saved_strength = float(self.w.harnessStrength.get())
+        self._save("harness", bool(self._harness_selection))
+        self._save("harnessProfile", self._harness_selection)
+        self._save("harnessStrength", self._harness_saved_strength)
+        self._apply_when_done = self._apply_after_preview = self._whole_after_preview = False
+        self._result_key = None
+        self._harness_cache = None
+        if self._job is not None and self._job_kind == "preview":
+            self._job.free()
+            self._job = None
+            self._job_kind = None
         self._show_slider_values()
         self._update_labels()
         self._request_preview()
         if self.harness_window is not None:
             self.harness_window.settings_changed()
+
+    def importHarnessPath(self, path):
+        if self._harness_busy():
+            raise ValueError("Wait for Apply/Revert or cancel the whole-font run before importing a harness.")
+        target = khp.import_profile(path)
+        self._fontz_harness = khp.load_fontz_profile()
+        self._fontz_harness_error = ""
+        self.w.harness.set(2)
+        self.harnessChanged(None)
+        return target
+
+    def importHarnessClicked(self, sender=None):
+        if self._harness_busy():
+            return
+        panel = NSOpenPanel.openPanel()
+        panel.setAllowedFileTypes_(["json"])
+        panel.setAllowsMultipleSelection_(False)
+        if panel.runModal() == NSModalResponseOK:
+            try:
+                self.importHarnessPath(str(panel.URL().path()))
+            except (ValueError, OSError) as error:
+                Message("The harness could not be imported: %s" % error, title="Kinetikern3")
 
     def set_harness_style(self, style):
         """Follow the conventions of `style` ("auto", "text", "display",

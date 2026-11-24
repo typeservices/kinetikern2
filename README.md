@@ -1685,3 +1685,9 @@ Copyright 2026 Mirko Velimirovic. Licensed under the
 [Apache License, Version 2.0](LICENSE); see also [NOTICE](NOTICE).
 Kinetikern2 is under the Apache License 2.0 too since 1 November 2026; its
 earlier releases came with the MIT License.
+
+### Local Fontz harness
+
+The Glyphs plugin also offers **Fontz** alongside **Off** and **Google Fonts**. This profile is retrained on the local Fontz collection for this exact Kinetikern3 engine and its punctuation conventions. It is experimental pending visual review and supports upright Latin with Text faces conventions and Punctuation enabled. The existing default remains Off.
+
+Use **Harness…** to inspect its corrections or **Import Fontz…** to load a compatible profile. See [Fontz migration and reproduction](docs/fontz-k3.md) for scope, validation and local report details. This addition currently applies to the Glyphs plugin; the RoboFont extension retains its existing harness.
